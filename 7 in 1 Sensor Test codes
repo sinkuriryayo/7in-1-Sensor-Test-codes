@@ -1,0 +1,95 @@
+#include <HardwareSerial.h>
+
+#define RS485_RX 16
+#define RS485_TX 17
+#define RS485_DE_RE 18
+
+uint8_t requestFrame[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00};
+uint8_t responseFrame[19];
+
+void preTransmission() {
+  digitalWrite(RS485_DE_RE, HIGH);
+}
+
+void postTransmission() {
+  delay(2); // Allow data to finish sending
+  digitalWrite(RS485_DE_RE, LOW);
+}
+
+uint16_t calculateCRC(uint8_t *data, uint8_t length) {
+  uint16_t crc = 0xFFFF;
+  for (uint8_t i = 0; i < length; i++) {
+    crc ^= data[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      if (crc & 0x0001) {
+        crc >>= 1;
+        crc ^= 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(4800, SERIAL_8N1, RS485_RX, RS485_TX);
+
+  pinMode(RS485_DE_RE, OUTPUT);
+  digitalWrite(RS485_DE_RE, LOW); // Start in receive mode
+
+  Serial.println("📡 Scanning Modbus addresses 1–10...");
+}
+
+void loop() {
+  for (uint8_t id = 1; id <= 10; id++) {
+    requestFrame[0] = id; // Set Modbus ID
+    uint16_t crc = calculateCRC(requestFrame, 6);
+    requestFrame[6] = crc & 0xFF;
+    requestFrame[7] = crc >> 8;
+
+    // Send request
+    preTransmission();
+    Serial2.write(requestFrame, 8);
+    Serial2.flush();
+    postTransmission();
+
+    delay(100); // Wait for response
+
+    if (Serial2.available() >= 19) {
+      Serial2.readBytes(responseFrame, 19);
+
+      uint16_t moisture     = (responseFrame[3] << 8) | responseFrame[4];
+      uint16_t temperature  = (responseFrame[5] << 8) | responseFrame[6];
+      uint16_t conductivity = (responseFrame[7] << 8) | responseFrame[8];
+      uint16_t pH           = (responseFrame[9] << 8) | responseFrame[10];
+      uint16_t nitrogen     = (responseFrame[11] << 8) | responseFrame[12];
+      uint16_t phosphorus   = (responseFrame[13] << 8) | responseFrame[14];
+      uint16_t potassium    = (responseFrame[15] << 8) | responseFrame[16];
+
+      Serial.print("✅ Found device at ID ");
+      Serial.println(id);
+      Serial.print("Moisture: "); Serial.println(moisture / 10.0);
+      Serial.print("Temperature: "); Serial.println(temperature / 10.0);
+      Serial.print("Conductivity: "); Serial.println(conductivity);
+      Serial.print("pH: "); Serial.println(pH / 10.0);
+      Serial.print("N: "); Serial.println(nitrogen);
+      Serial.print("P: "); Serial.println(phosphorus);
+      Serial.print("K: "); Serial.println(potassium);
+      Serial.println("------------------------------");
+
+      delay(5000); // Optional delay before next loop
+      return; // Exit loop after first successful read
+    } else {
+      Serial.print("❌ No response at address ");
+      Serial.println(id);
+      while (Serial2.available()) Serial2.read(); // Clear buffer
+    }
+
+    delay(1000); // Delay between address attempts
+  }
+
+  Serial.println("🔁 Scan complete. Restarting in 10 seconds...\n");
+  delay(10000);
+}
