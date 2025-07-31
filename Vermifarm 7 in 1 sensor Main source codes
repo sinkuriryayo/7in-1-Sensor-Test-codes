@@ -1,0 +1,217 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HardwareSerial.h>
+#include <DHT.h>
+
+// WiFi Access Point Configuration
+const char* ssid = "Vermifarm_IoT";
+const char* password = "vermi@1234";
+
+// Sensor Configuration
+#define DHT_PIN 4
+#define DHT_TYPE DHT11
+#define MOISTURE_PIN 34
+
+// RS485 Configuration
+#define RS485_RX 16
+#define RS485_TX 17
+#define RS485_DE_RE 18
+
+// Modbus Request Frame
+uint8_t requestFrame[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00};
+uint8_t responseFrame[19];
+
+// Global Variables
+WebServer server(80);
+HardwareSerial RS485(2);
+DHT dht(DHT_PIN, DHT_TYPE);
+
+bool soil7in1Active = true;
+bool airMoistureActive = false;
+unsigned long lastUpdate = 0;
+String soilData = "No data yet";
+String airData = "No data yet";
+
+void preTransmission() {
+  digitalWrite(RS485_DE_RE, HIGH);
+}
+
+void postTransmission() {
+  delay(2);
+  digitalWrite(RS485_DE_RE, LOW);
+}
+
+uint16_t calculateCRC(uint8_t *data, uint8_t length) {
+  uint16_t crc = 0xFFFF;
+  for (uint8_t i = 0; i < length; i++) {
+    crc ^= data[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      if (crc & 0x0001) {
+        crc >>= 1;
+        crc ^= 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+String read7in1Sensor() {
+  String result = "";
+  
+  for (uint8_t id = 1; id <= 10; id++) {
+    requestFrame[0] = id;
+    uint16_t crc = calculateCRC(requestFrame, 6);
+    requestFrame[6] = crc & 0xFF;
+    requestFrame[7] = crc >> 8;
+
+    preTransmission();
+    RS485.write(requestFrame, 8);
+    RS485.flush();
+    postTransmission();
+
+    delay(100);
+
+    if (RS485.available() >= 19) {
+      RS485.readBytes(responseFrame, 19);
+
+      uint16_t moisture     = (responseFrame[3] << 8) | responseFrame[4];
+      uint16_t temperature  = (responseFrame[5] << 8) | responseFrame[6];
+      uint16_t conductivity = (responseFrame[7] << 8) | responseFrame[8];
+      uint16_t pH           = (responseFrame[9] << 8) | responseFrame[10];
+      uint16_t nitrogen     = (responseFrame[11] << 8) | responseFrame[12];
+      uint16_t phosphorus   = (responseFrame[13] << 8) | responseFrame[14];
+      uint16_t potassium    = (responseFrame[15] << 8) | responseFrame[16];
+
+      result += "Device ID: " + String(id) + "<br>";
+      result += "Soil Moisture: " + String(moisture / 10.0) + "%<br>";
+      result += "Soil Temperature: " + String(temperature / 10.0) + "°C<br>";
+      result += "Conductivity: " + String(conductivity) + " µS/cm<br>";
+      
+      // Heavy metal warning based on conductivity
+      if (conductivity > 2000) {
+        result += "<span style='color:red'>⚠ High conductivity - Possible heavy metal contamination!</span><br>";
+      } else {
+        result += "<span style='color:green'>✓ No heavy metals detected</span><br>";
+      }
+      
+      result += "pH: " + String(pH / 10.0) + "<br>";
+      result += "Nitrogen (N): " + String(nitrogen) + " mg/kg<br>";
+      result += "Phosphorus (P): " + String(phosphorus) + " mg/kg<br>";
+      result += "Potassium (K): " + String(potassium) + " mg/kg";
+
+      return result;
+    } else {
+      result = "No response from 7-in-1 sensor";
+      while (RS485.available()) RS485.read();
+    }
+
+    delay(1000);
+  }
+  return "No 7-in-1 sensor found";
+}
+
+String readAirAndCapacitiveMoisture() {
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+  int capacitiveMoisture = analogRead(MOISTURE_PIN);
+  int moisturePercentage = map(capacitiveMoisture, 0, 4095, 0, 100);
+
+  String result = "";
+  result += "Air Temperature: " + String(temperature) + "°C<br>";
+  result += "Air Humidity: " + String(humidity) + "%<br>";
+  result += "Capacitive Moisture: " + String(moisturePercentage) + "%<br>";
+  
+  return result;
+}
+
+String createHTMLPage() {
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>body{font-family:Segoe UI;background:#f0fdf4;padding:0;margin:0;color:#333}";
+  html += "header{background:#15803d;color:#fff;text-align:center;padding:20px}";
+  html += ".container{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;padding:30px}";
+  html += ".card{background:#fff;border-radius:20px;padding:20px;box-shadow:0 4px 10px rgba(0,0,0,0.1);text-align:center}";
+  html += ".switch{position:relative;display:inline-block;width:60px;height:34px}";
+  html += ".switch input{opacity:0;width:0;height:0}";
+  html += ".slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#ccc;transition:.4s;border-radius:34px}";
+  html += ".slider:before{position:absolute;content:\"\";height:26px;width:26px;left:4px;bottom:4px;background-color:white;transition:.4s;border-radius:50%}";
+  html += "input:checked + .slider{background-color:#15803d}";
+  html += "input:checked + .slider:before{transform:translateX(26px)}";
+  html += ".switch-label{margin-left:10px;vertical-align:middle}";
+  html += "footer{background:#065f46;color:#fff;text-align:center;padding:15px;font-size:0.9rem}</style>";
+  html += "<title>VERMIFARM Soil Monitoring</title></head><body>";
+  html += "<header><h1>VERMIFARM Ltd</h1><p>Smart Nutrients & Toxicity Monitoring System</p></header>";
+  html += "<div class='container'>";
+  
+  // 7-in-1 Soil Sensor Card
+  html += "<div class='card'><h2>7-in-1 Soil Sensor</h2>";
+  html += "<label class='switch'><input type='checkbox' onchange=\"toggle('soil7in1')\" " + String(soil7in1Active ? "checked" : "") + ">";
+  html += "<span class='slider'></span><span class='switch-label'>Active</span></label>";
+  html += "<div style='margin-top:20px;text-align:left'>" + (soil7in1Active ? soilData : "Sensor inactive") + "</div></div>";
+  
+  // Air and Capacitive Moisture Card
+  html += "<div class='card'><h2>Air & Capacitive Moisture</h2>";
+  html += "<label class='switch'><input type='checkbox' onchange=\"toggle('airMoisture')\" " + String(airMoistureActive ? "checked" : "") + ">";
+  html += "<span class='slider'></span><span class='switch-label'>Active</span></label>";
+  html += "<div style='margin-top:20px;text-align:left'>" + (airMoistureActive ? airData : "Sensor inactive") + "</div></div>";
+  
+  html += "</div>";
+  html += "<footer>The Homestead of organic Agriculture: One worm at a time!</footer>";
+  html += "<script>";
+  html += "function toggle(id){fetch('/toggle?device='+id).then(()=>location.reload());}";
+  html += "setTimeout(()=>location.reload(),10000);"; // Auto-refresh every 10 seconds
+  html += "</script></body></html>";
+
+  return html;
+}
+
+void handleRoot() {
+  server.send(200, "text/html", createHTMLPage());
+}
+
+void handleToggle() {
+  String device = server.arg("device");
+  if (device == "soil7in1") soil7in1Active = !soil7in1Active;
+  if (device == "airMoisture") airMoistureActive = !airMoistureActive;
+  server.send(200, "text/plain", "OK");
+}
+
+void setup() {
+  Serial.begin(115200);
+  RS485.begin(4800, SERIAL_8N1, RS485_RX, RS485_TX);
+  dht.begin();
+  pinMode(MOISTURE_PIN, INPUT);
+  pinMode(RS485_DE_RE, OUTPUT);
+  digitalWrite(RS485_DE_RE, LOW);
+
+  // Start Access Point
+  WiFi.softAP(ssid, password);
+  Serial.println("Access Point Started");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Initialize sensor data
+  soilData = read7in1Sensor();
+  airData = readAirAndCapacitiveMoisture();
+
+  // Set up web server
+  server.on("/", handleRoot);
+  server.on("/toggle", handleToggle);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+
+  // Update sensor data every 5 seconds
+  if (millis() - lastUpdate > 5000) {
+    if (soil7in1Active) {
+      soilData = read7in1Sensor();
+    }
+    if (airMoistureActive) {
+      airData = readAirAndCapacitiveMoisture();
+    }
+    lastUpdate = millis();
+  }
+}
