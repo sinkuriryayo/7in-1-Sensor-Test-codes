@@ -1,0 +1,88 @@
+#include <SoftwareSerial.h>
+
+// RS485 Pins
+const byte ROPin = 2;
+const byte DIPin = 3;
+const byte DE = 6;
+const byte RE = 7;
+SoftwareSerial max485Serial(ROPin, DIPin);
+
+// Sensor commands
+const byte temp[]  = {0x01,0x03,0x00,0x13,0x00,0x01,0x75,0xCF};
+const byte mois[]  = {0x01,0x03,0x00,0x12,0x00,0x01,0x24,0x0F};
+const byte econ[]  = {0x01,0x03,0x00,0x15,0x00,0x01,0x95,0xCE};
+const byte ph[]    = {0x01,0x03,0x00,0x06,0x00,0x01,0x64,0x0B};
+const byte nitro[] = {0x01,0x03,0x00,0x1E,0x00,0x01,0xE4,0x0C};
+const byte phos[]  = {0x01,0x03,0x00,0x1F,0x00,0x01,0xB5,0xCC};
+const byte pota[]  = {0x01,0x03,0x00,0x20,0x00,0x01,0x85,0xC0};
+
+// Variables
+float soil_temp = 0, soil_moist = 0, soil_ph = 0;
+byte ec_val = 0, n_val = 0, p_val = 0, k_val = 0;
+byte values[11];
+
+void setup() {
+  Serial.begin(9600);
+  max485Serial.begin(9600);
+
+  pinMode(DE, OUTPUT);
+  pinMode(RE, OUTPUT);
+  digitalWrite(DE, LOW);
+  digitalWrite(RE, LOW);
+
+  Serial.println("✅ 7-in-1 Soil Sensor Ready");
+  delay(2000);
+}
+
+void loop() {
+  // Read sensor values using original working method
+  soil_moist = readSensor(mois, sizeof(mois)) / 10.0;
+  soil_temp  = readSensor(temp, sizeof(temp)) / 10.0;
+  ec_val     = readSensor(econ, sizeof(econ));
+  soil_ph    = readSensor(ph, sizeof(ph)) / 10.0;
+  n_val      = readSensor(nitro, sizeof(nitro));
+  p_val      = readSensor(phos, sizeof(phos));
+  k_val      = readSensor(pota, sizeof(pota));
+
+  // Print results
+  Serial.println("----- Soil Sensor Values -----");
+  Serial.print("Moisture: "); Serial.print(soil_moist); Serial.println(" %");
+  Serial.print("Temperature: "); Serial.print(soil_temp); Serial.println(" °C");
+  Serial.print("EC: "); Serial.print(ec_val); Serial.println(" µS/cm");
+  Serial.print("pH: "); Serial.println(soil_ph);
+  Serial.print("Nitrogen: "); Serial.print(n_val); Serial.println(" mg/kg");
+  Serial.print("Phosphorus: "); Serial.print(p_val); Serial.println(" mg/kg");
+  Serial.print("Potassium: "); Serial.print(k_val); Serial.println(" mg/kg");
+  Serial.println("-------------------------------\n");
+
+  delay(2000);
+}
+
+// ----------------------------
+// Send command and read 5th byte as value
+byte readSensor(const byte *command, byte length) {
+  clearBuffer();
+
+  digitalWrite(DE, HIGH);
+  digitalWrite(RE, HIGH);
+  delay(1);
+
+  for(byte i=0;i<length;i++) max485Serial.write(command[i]);
+  max485Serial.flush();
+
+  digitalWrite(DE, LOW);
+  digitalWrite(RE, LOW);
+  delay(200);
+
+  byte bytesRead = 0;
+  while(max485Serial.available() && bytesRead<7) {
+    values[bytesRead++] = max485Serial.read();
+  }
+
+  return bytesRead==7 ? values[4] : 0;
+}
+
+// Clear RS485 buffer
+void clearBuffer() {
+  while(max485Serial.available()) max485Serial.read();
+}
