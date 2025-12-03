@@ -1,0 +1,134 @@
+#include <SoftwareSerial.h>
+
+// ===================== RS485 Configuration =======================
+#define RE_DE 4
+SoftwareSerial rs485(2, 3);  // RX = 2, TX = 3
+uint8_t slaveID = 1;
+
+// =================== SENSOR VALUES ==============================
+uint16_t N = 0, P = 0, K = 0, EC = 0;
+float moisture = 0, ph = 0, tempC = 0;
+
+// =================== TIMING CONFIG ==============================
+unsigned long lastSensorRead = 0;
+const unsigned long SENSOR_INTERVAL = 5000;  // 1 sec
+
+// ================== RS485 MODBUS READ ===========================
+uint16_t readRegister(uint16_t reg) {
+  uint8_t request[] = { slaveID, 0x03, reg >> 8, reg & 0xFF, 0x00, 0x01 };
+  uint16_t crc = 0xFFFF;
+  for (int i = 0; i < 6; i++) {
+    crc ^= request[i];
+    for (int j = 0; j < 8; j++) {
+      if (crc & 1) { crc >>= 1; crc ^= 0xA001; }
+      else crc >>= 1;
+    }
+  }
+
+  uint8_t frame[8];
+  memcpy(frame, request, 6);
+  frame[6] = crc & 0xFF;
+  frame[7] = crc >> 8;
+
+  digitalWrite(RE_DE, HIGH);
+  delay(2);
+  rs485.write(frame, 8);
+  rs485.flush();
+  digitalWrite(RE_DE, LOW);
+  delay(2);
+
+  uint8_t response[7];
+  int len = rs485.readBytes(response, 7);
+  if (len != 7) return 0;
+
+  return (response[3] << 8) | response[4];
+}
+
+// ======================= AGRONOMIC ANALYSIS ========================
+String analyseMoisture(float m) {
+  if (m < 20) return "Low moisture → Irrigation needed.";
+  if (m <= 40) return "Optimal soil moisture.";
+  return "High moisture → Risk of root rot.";
+}
+
+String analysePH(float p) {
+  if (p < 5.5) return "Soil is acidic → Apply lime.";
+  if (p <= 7.5) return "pH is optimal.";
+  return "Soil is alkaline → Apply sulfur or organic matter.";
+}
+
+String analyseEC(uint16_t e) {
+  if (e < 800) return "Low fertility → Add fertilizers.";
+  if (e < 1600) return "EC optimal.";
+  if (e < 2400) return "High EC → Reduce fertilizer.";
+  return "EC too high → Flush soil with irrigation.";
+}
+
+String analyseTemp(float t) {
+  if (t < 15) return "Cold soil → Slow plant growth.";
+  if (t <= 25) return "Optimal soil temperature.";
+  return "High temperature stress.";
+}
+
+String analyseNPK(uint16_t N, uint16_t P, uint16_t K) {
+  String msg = "";
+
+  msg += (N < 50 ? "Low N → Add nitrogen.\n" : (N <= 150 ? "N optimal.\n" : "N high → Reduce N fertilizer.\n"));
+  msg += (P < 15 ? "Low P → Add phosphorus.\n" : (P <= 80 ? "P optimal.\n" : "P high → Reduce P fertilizer.\n"));
+  msg += (K < 100 ? "Low K → Add potassium.\n" : (K <= 300 ? "K optimal.\n" : "K high → Reduce K fertilizer.\n"));
+
+  return msg;
+}
+
+// =========================== SETUP ==============================
+void setup() {
+  Serial.begin(9600);
+  rs485.begin(9600);
+  pinMode(RE_DE, OUTPUT);
+  digitalWrite(RE_DE, LOW);
+
+  Serial.println("GAH FARM SOIL MONITORING SYSTEM STARTED\n");
+}
+
+// =========================== LOOP ===============================
+void loop() {
+
+  if (millis() - lastSensorRead >= SENSOR_INTERVAL) {
+
+    // Read all registers
+    N = readRegister(0x001E);
+    P = readRegister(0x001F);
+    K = readRegister(0x0020);
+    moisture = readRegister(0x0012) / 10.0;
+    EC = readRegister(0x0015);
+    ph = readRegister(0x0006) / 100.0;
+    tempC = readRegister(0x0013) / 10.0;
+
+    // Print Values
+    Serial.println("==============================================");
+    Serial.println("          GAH FARM SOIL STATUS REPORT");
+    Serial.println("==============================================");
+
+    Serial.print("Moisture: "); Serial.print(moisture); Serial.println("%");
+    Serial.print("Temperature: "); Serial.print(tempC); Serial.println(" °C");
+    Serial.print("pH: "); Serial.println(ph, 2);
+    Serial.print("EC: "); Serial.print(EC); Serial.println(" us/cm");
+
+    Serial.print("Nitrogen (N): "); Serial.println(N);
+    Serial.print("Phosphorus (P): "); Serial.println(P);
+    Serial.print("Potassium (K): "); Serial.println(K);
+
+    Serial.println("\n--- AGRONOMIC ANALYSIS ---");
+
+    Serial.println(analyseMoisture(moisture));
+    Serial.println(analyseTemp(tempC));
+    Serial.println(analysePH(ph));
+    Serial.println(analyseEC(EC));
+    Serial.println(analyseNPK(N, P, K));
+
+    Serial.println("==============================================\n");
+
+    lastSensorRead = millis();
+  }
+}
+
